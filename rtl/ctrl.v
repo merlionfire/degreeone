@@ -7,7 +7,8 @@ module ctrl(
     
    // interface with gen_pc module
    output wire          stall_pc,
-   output wire  [2:0]   npc_mux_sel,
+   output wire          uncond_jump_predict_fail_id,
+   output reg           cond_jump_predict_fail_ex, 
 
    // interface with if stage
    output wire          stall_id,
@@ -20,6 +21,8 @@ module ctrl(
    output wire          reg_wr_addr_rt_sel,
    output wire          reg_a_comp_mux,
    output wire          reg_b_comp_mux,
+   output wire          jr_sel,
+   output wire          jal_j_sel,
 
    // interface with exe stage 
    input  wire          alu_zero_ex,
@@ -37,8 +40,13 @@ module ctrl(
    
    // interface with wb stage 
    output reg           reg_wr_en_wb,
-   output reg           lw_sel_wb
+   output reg           lw_sel_wb,
 
+   // interface with branch predictor
+   input  wire          jump_taken_predict,
+   output wire          uncond_jump_instr,
+   output wire          cond_jump_instr,
+   output reg           cond_jump_taken_ex
 );
 
    `include "opcode_def.vh" 
@@ -85,12 +93,15 @@ module ctrl(
    wire          reg_b_conflict_with_ex;
    wire          reg_b_conflict_with_mem;
    wire          load_use_occur;
-   wire          jr_addr_sel;
-   wire          jal_j_addr_sel;
    wire          beq_bne_addr_sel;
    wire          flush_ex;
    wire          imm_ext_sel;
    wire          compare_delay ; 
+   wire          cond_jump_taken;
+   wire          cond_jump_predict_fail;
+   wire          uncond_jump_taken;
+   reg           jump_taken_predict_id;
+
 
    assign rs     =   instr_r[25:21];
    assign rt     =   instr_r[20:16]; 
@@ -234,11 +245,9 @@ module ctrl(
    //     Branch Hazard Detect Unit
    //*******************************************
 
-   assign jr_addr_sel    =  i[JR] ;  
-   assign jal_j_addr_sel   =  i[JAL] | i[JUMP] ;    
-   assign beq_bne_addr_sel  = ( i[BEQ] & rd_a_equ_rd_b_id ) | (i[BNE] & ~rd_a_equ_rd_b_id ) ;  
+   assign jr_sel    =  i[JR] ;  
+   assign jal_j_sel   =  i[JAL] | i[JUMP] ;    
 
-   assign npc_mux_sel =  { beq_bne_addr_sel, jr_addr_sel, jal_j_addr_sel } ;       
 
    assign reg_a_comp_mux   =  hazard_with_mem_for_reg_a  ; 
    assign reg_b_comp_mux   =  hazard_with_mem_for_reg_b  ; 
@@ -266,26 +275,56 @@ module ctrl(
    //                                     beq   $1, $0,  target
    assign compare_delay =  ( hazard_with_ex_for_reg_a | hazard_with_ex_for_reg_b | ( hazard_with_mem_for_reg_a | hazard_with_mem_for_reg_b ) & lw_sel_mm ) & ( i[BEQ] | i[BNE] ) ;  
 
+
+   // ***************************************************************************************
+   //                branch prediction 
+   // ***************************************************************************************
+   //
+
+
+   //////////////////////////////////////////////////////////////////////////////////////////////
+   //    unconditioanl jump
+   // *) Outcome is avalible in ID stage. 
+   // *) Missprediction will lead to flush IF 
+   // *) If no pc of jump instuction histroy is ever stored in BTB,
+   //    1) Since hit == 0 -> jump_takke_predict == 0 -> uncond_jump_predict_fail must be asserted 
+   //    2) flush id at the next cycle ( discard feteched instruction at IF  now) 
+   //    3) offer  jump target to pc generator 
+   // So, uncond_jump_predict_fail indates that there is a miss for
+   // pc of unconditional jump instruction in BTB 
+
+   assign uncond_jump_instr  = ( jr_sel | jal_j_sel ); 
+   assign uncond_jump_taken  = uncond_jump_instr;
+   assign uncond_jump_predict_fail_id   =  uncond_jump_taken & (~jump_taken_predict_id ); 
+
+   //////////////////////////////////////////////////////////////////////////////////////////////
+   //    conditioanl jump
+   //
+   //////////////////////////////////////////////////////////////////////////////////////////////
+   assign cond_jump_instr    = ( i[BEQ] | i[BNE] ); 
+   assign cond_jump_taken    = ( i[BEQ] & rd_a_equ_rd_b_id ) | (i[BNE] & ~rd_a_equ_rd_b_id ); 
+
+   assign cond_jump_predict_fail  = cond_jump_instr & ( cond_jump_taken ^ jump_taken_predict_id ); 
+
+   //assign branch_instr  = i[BEQ] | i[BNE] | jr_sel | jal_j_sel  ;    
+
+
    // Stall singal for respective stages
    // "Stall" frozes pipeline and keeps output as previous cycle 
    assign stall_pc   =  load_use_occur | compare_delay ;
    assign stall_id   =  load_use_occur | compare_delay; 
 
-
-   // Flush singal for respective stages
-   assign flush_ex   =  load_use_occur | compare_delay; 
-
-   // Assertion of "flush_id" indicates NOP will be inserted into ID stage at
-   // next cycle.
 `ifdef DELAYED_BRANCH          
-   assign flush_id   = 0 ;  
+   // Assertion of "flush_id" indicates NOP will be inserted into ID stage at next cycle.
+   assign flush_id   =  cond_jump_predict_fail_ex ;  
+   assign flush_ex   =  load_use_occur | compare_delay ; 
 `else
-   assign flush_id   =  ( ~compare_delay) && ( jr_addr_sel | jal_j_addr_sel | beq_bne_addr_sel );     
+   assign flush_id   =  ( ~compare_delay) && ( uncond_jump_predict_fail_id | cond_jump_predict_fail_ex );     
+   // Flush singal for respective stages
+   assign flush_ex   =  load_use_occur | compare_delay | cond_jump_predict_fail_ex; 
 `endif
 
-
-
-   assign   imm_ext_sel   =  i[ARITH_IMM] | i[LW] | i[LUI] | i[SW] ; 
+   assign imm_ext_sel   =  i[ARITH_IMM] | i[LW] | i[LUI] | i[SW] ; 
 
    //*******************************************
    //     ID stage control signals
@@ -293,6 +332,14 @@ module ctrl(
    assign   sext_sel_id =  sext_sel; 
    //assign   reg_wr_addr_rt_sel = arith_imm_sel | lw_sel | lui_sel | mfc0_sel; 
    assign   reg_wr_addr_rt_sel = i[ARITH_IMM] | i[LW] | i[LUI] ; 
+
+   always @( posedge clk ) begin  
+      if (rst) begin 
+         jump_taken_predict_id <= 'h0;     
+      end else begin
+         jump_taken_predict_id <= jump_taken_predict;     
+      end
+   end
    //*******************************************
    //     EXE stage control signals
    //*******************************************
@@ -305,6 +352,8 @@ module ctrl(
          mem_wr_en_ex      <= 'h0;
          reg_wr_en_ex      <= 'h0;
          lw_sel_ex         <= 'h0;
+         cond_jump_predict_fail_ex   <= 'h0;     
+         cond_jump_taken_ex          <= 'h0;    
       end else begin
          alu_ctrl_ex       <= alu_ctrl;
          alu_a_mux_sel_ex  <= shift_sel; 
@@ -313,6 +362,9 @@ module ctrl(
          mem_wr_en_ex      <= i[SW] & ( ~ flush_ex ) ;
          reg_wr_en_ex      <= ~ ( i[NOP] |  i[JUMP] | i[BEQ] | i[BNE] | i[SW] | i[JR] | flush_ex ) ;
          lw_sel_ex         <= i[LW] ; 
+         cond_jump_predict_fail_ex   <= cond_jump_predict_fail;     
+         cond_jump_taken_ex          <= cond_jump_taken;    
+
       end
    end
 

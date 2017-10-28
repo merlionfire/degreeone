@@ -23,17 +23,21 @@ module id_stage(
 
    // Interface with pc_gen
    output wire  [31:0]  jal_j_addr_id,
-   output wire  [31:0]  beq_bne_addr_id,
+   output wire  [31:0]  cond_jump_addr_id,
+   output wire  [31:0]  uncond_jump_addr_id,
    output wire  [31:0]  jr_addr_id,
     
    // Internal forwarding signals from other stage 
    input  wire  [31:0]  exec_out_fw,
 
    // Interface with ctrl 
+   input  wire          jr_sel,
+   input  wire          jal_j_sel,
    input  wire          sext_sel_id,
    input  wire          reg_wr_addr_rt_sel, 
    input  wire          reg_a_comp_mux,
    input  wire          reg_b_comp_mux,
+   input  wire          cond_jump_instr,
    output wire          rd_a_equ_rd_b_id
 );
 
@@ -91,10 +95,10 @@ module id_stage(
       end
    end
 
-   // path to NPC muxplexer   
-   assign beq_bne_addr_id = pc_plus_1_if_r + { imm_ext[29:0], 2'b00}  ; 
+   assign cond_jump_addr_id = {32{cond_jump_instr} } & ( pc_plus_1_if_r + { imm_ext[29:0], 2'b00} ) ; 
    assign jr_addr_id      = reg_rd_a;
    assign jal_j_addr_id   = { pc_plus_1_if_r[31:28], jump_target,  2'b00 };
+   assign uncond_jump_addr_id = {32{jr_sel}} &jr_addr_id | {32{jal_j_sel}} & jal_j_addr_id ; 
 
 
    assign reg_a_data_new   = ( reg_a_comp_mux ) ? exec_out_fw : reg_rd_a ; 

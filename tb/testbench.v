@@ -50,6 +50,17 @@ module tb () ;
       #5 rst = 1'b0 ;      
       
       repeat (100) @( posedge clk ) ;  
+      fork 
+         begin 
+            wait( mips32_pipeline_inst.pc == 'h0 ) ; 
+            @( posedge clk ) ;  
+            $display("@%t Simulation stops because of 0 of PC !!!", $time()) ; 
+         end
+         begin 
+            #1ms; 
+            $display("@%t Simulation stops because of timeout !!!", $time()) ; 
+         end 
+      join_any
       $finish ; 
    end
 
